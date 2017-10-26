@@ -44,6 +44,7 @@
 - [#8968](https://github.com/influxdata/influxdb/issues/8968): Make client errors more helpful on downstream errs. Thanks @darkliquid!
 - [#8984](https://github.com/influxdata/influxdb/pull/8984): EXACT and estimated CARDINALITY queries.
 - [#8893](https://github.com/influxdata/influxdb/pull/8893): Handle nil MeasurementIterator.
+- [#9021](https://github.com/influxdata/influxdb/pull/9021): Update to go 1.9.2
 
 ### Bugfixes
 
