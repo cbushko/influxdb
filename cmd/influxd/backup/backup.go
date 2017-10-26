@@ -204,6 +204,8 @@ func (cmd *Command) backupShard(rp, sid string) error {
 		RetentionPolicy: rp,
 		ShardID:         id,
 		Since:           cmd.since,
+		ExportStart:     cmd.start,
+		ExportEnd:       cmd.end,
 	}
 
 	// TODO: verify shard backup data
@@ -376,6 +378,8 @@ func (cmd *Command) download(req *snapshotter.Request, path string) error {
 			}
 			defer conn.Close()
 
+			conn.Write([]byte{byte(req.Type)})
+
 			// Write the request
 			if err := json.NewEncoder(conn).Encode(req); err != nil {
 				return fmt.Errorf("encode snapshot request: %s", err)
@@ -405,6 +409,7 @@ func (cmd *Command) requestInfo(request *snapshotter.Request) (*snapshotter.Resp
 		return nil, err
 	}
 	defer conn.Close()
+	conn.Write([]byte{byte(request.Type)})
 
 	// Write the request
 	if err := json.NewEncoder(conn).Encode(request); err != nil {

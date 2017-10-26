@@ -111,12 +111,34 @@ func (s *Service) serve() {
 
 // handleConn processes conn. This is run in a separate goroutine.
 func (s *Service) handleConn(conn net.Conn) error {
+	var Type [1]byte
+
+	n, err := conn.Read(Type[:])
+
+	fmt.Printf("read %d bytes", n)
+
+	if err != nil {
+		return err
+	}
+	fmt.Println("Handling connection!!!!!!!")
+	switch RequestType(Type[0]) {
+	case RequestShardUpdate:
+		var sidBytes [8]byte
+		conn.Read(sidBytes[:])
+		sid := binary.BigEndian.Uint64(sidBytes[:])
+		fmt.Printf("Restoring a shard: %d", sid)
+		s.TSDBStore.ImportShard(sid, conn)
+		s.TSDBStore.SetShardEnabled(sid, true)
+		return nil
+
+	}
+
 	r, bytes, err := s.readRequest(conn)
 	if err != nil {
 		return fmt.Errorf("read request: %s", err)
 	}
 
-	switch r.Type {
+	switch RequestType(Type[0]) {
 	case RequestShardBackup:
 		if err := s.TSDBStore.BackupShard(r.ShardID, r.Since, conn); err != nil {
 			return err
@@ -133,9 +155,7 @@ func (s *Service) handleConn(conn net.Conn) error {
 		return s.writeDatabaseInfo(conn, r.Database)
 	case RequestRetentionPolicyInfo:
 		return s.writeRetentionPolicyInfo(conn, r.Database, r.RetentionPolicy)
-
 	case RequestMetaStoreUpdate:
-
 		return s.updateMetaStore(conn, bytes, r.Database, r.RetentionPolicy)
 	default:
 		return fmt.Errorf("request type unknown: %v", r.Type)
@@ -146,6 +166,7 @@ func (s *Service) handleConn(conn net.Conn) error {
 func (s *Service) updateMetaStore(conn net.Conn, bits []byte, newDBName, newRPName string) error {
 
 	fmt.Println("!!!!! working on the metastore")
+	fmt.Println(bits)
 	md := meta.Data{}
 	err := md.UnmarshalBinary(bits)
 	if err != nil {
@@ -161,7 +182,12 @@ func (s *Service) updateMetaStore(conn net.Conn, bits []byte, newDBName, newRPNa
 
 	fmt.Println(data)
 	fmt.Println(IDMap)
+	rpName := data.Database(newDBName).DefaultRetentionPolicy
 	err = s.MetaClient.(*meta.Client).SetData(&data)
+
+	for _, v := range IDMap {
+		s.TSDBStore.CreateShard(newDBName, rpName, v, true)
+	}
 
 	npairs := len(IDMap)
 	// 2 information ints, then npairs of 8byte ints.
@@ -347,7 +373,7 @@ func (s *Service) readRequest(conn net.Conn) (Request, []byte, error) {
 
 		// it is a bit random but sometimes the Json decoder will consume all the bytes and sometimes
 		// it will leave a few behind.
-		if n < int(r.UploadSize+1) {
+		if err != io.EOF && n < int(r.UploadSize+1) {
 			n, err = conn.Read(bits[n:])
 		}
 
@@ -383,6 +409,10 @@ const (
 	// RequestMetaStoreUpdate represents a request to upload a metafile that will be used to do a live update
 	// to the existing metastore.
 	RequestMetaStoreUpdate
+
+	// RequestShardUpdate will initiate the upload of a shard data tar file
+	// and have the engine import the data.
+	RequestShardUpdate
 )
 
 // Request represents a request for a specific backup or for information

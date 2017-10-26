@@ -20,6 +20,7 @@ import (
 	"github.com/influxdata/influxdb/services/snapshotter"
 	"github.com/influxdata/influxdb/tcp"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -36,12 +37,13 @@ type Command struct {
 	host string
 	path string
 
-	backupFilesPath string
-	metadir         string
-	datadir         string
-	database        string
-	retention       string
-	shard           string
+	backupFilesPath     string
+	metadir             string
+	datadir             string
+	destinationDatabase string
+	sourceDatabase      string
+	retention           string
+	shard               string
 
 	// TODO: when the new meta stuff is done this should not be exported or be gone
 	MetaConfig *meta.Config
@@ -68,19 +70,31 @@ func (cmd *Command) Run(args ...string) error {
 		return err
 	}
 
-	if cmd.metadir != "" {
-		if err := cmd.unpackMeta(); err != nil {
-			return err
-		}
+	err := cmd.unpackMeta()
+	if err != nil {
+		cmd.StderrLogger.Printf("error: %v", err)
+		return err
 	}
+	cmd.StdoutLogger.Println("Executing shard upload")
 
-	if cmd.shard != "" {
-		return cmd.unpackShard(cmd.shard)
-	} else if cmd.retention != "" {
-		return cmd.unpackRetention()
-	} else if cmd.datadir != "" {
-		return cmd.unpackDatabase()
+	err = cmd.uploadShardsLive()
+	if err != nil {
+		cmd.StderrLogger.Printf("error: %v", err)
+		return err
 	}
+	//if cmd.metadir != "" {
+	//	if err := cmd.unpackMeta(); err != nil {
+	//		return err
+	//	}
+	//}
+	//
+	//if cmd.shard != "" {
+	//	return cmd.unpackShard(cmd.shard)
+	//} else if cmd.retention != "" {
+	//	return cmd.unpackRetention()
+	//} else if cmd.datadir != "" {
+	//	return cmd.unpackDatabase()
+	//}
 	return nil
 }
 
@@ -90,7 +104,8 @@ func (cmd *Command) parseFlags(args []string) error {
 	fs.StringVar(&cmd.host, "host", "localhost:8088", "")
 	fs.StringVar(&cmd.metadir, "metadir", "", "")
 	fs.StringVar(&cmd.datadir, "datadir", "", "")
-	fs.StringVar(&cmd.database, "database", "", "")
+	fs.StringVar(&cmd.destinationDatabase, "database", "", "")
+	fs.StringVar(&cmd.sourceDatabase, "origindb", "", "")
 	fs.StringVar(&cmd.retention, "retention", "", "")
 	fs.StringVar(&cmd.shard, "shard", "", "")
 	fs.SetOutput(cmd.Stdout)
@@ -109,23 +124,27 @@ func (cmd *Command) parseFlags(args []string) error {
 	}
 
 	// validate the arguments
-	if cmd.metadir == "" && cmd.database == "" {
-		return fmt.Errorf("-metadir or -database are required to restore")
+	if cmd.destinationDatabase == "" {
+		return fmt.Errorf("-database is a required parameter")
 	}
 
-	//if cmd.database != "" && cmd.datadir == "" {
+	if cmd.sourceDatabase == "" {
+		cmd.sourceDatabase = cmd.destinationDatabase
+	}
+
+	//if cmd.destinationDatabase != "" && cmd.datadir == "" {
 	//	return fmt.Errorf("-datadir is required to restore")
 	//}
 
 	if cmd.shard != "" {
-		if cmd.database == "" {
-			return fmt.Errorf("-database is required to restore shard")
+		if cmd.destinationDatabase == "" {
+			return fmt.Errorf("-destinationDatabase is required to restore shard")
 		}
 		if cmd.retention == "" {
 			return fmt.Errorf("-retention is required to restore shard")
 		}
-	} else if cmd.retention != "" && cmd.database == "" {
-		return fmt.Errorf("-database is required to restore retention policy")
+	} else if cmd.retention != "" && cmd.destinationDatabase == "" {
+		return fmt.Errorf("-destinationDatabase is required to restore retention policy")
 	}
 
 	return nil
@@ -150,7 +169,7 @@ func (cmd *Command) unpackMeta() error {
 	// Read the metastore backup
 	req := &snapshotter.Request{
 		Type:     snapshotter.RequestMetaStoreUpdate,
-		Database: cmd.database,
+		Database: cmd.destinationDatabase,
 	}
 
 	f, err := os.Open(latest)
@@ -219,7 +238,7 @@ func (cmd *Command) unpackMeta() error {
 // and restore them to the data dir
 func (cmd *Command) unpackShard(shardID string) error {
 	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database, cmd.retention, shardID)
+	restorePath := filepath.Join(cmd.datadir, cmd.destinationDatabase, cmd.retention, shardID)
 	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("shard already present: %s", restorePath)
 	}
@@ -230,21 +249,21 @@ func (cmd *Command) unpackShard(shardID string) error {
 	}
 
 	// find the shard backup files
-	pat := filepath.Join(cmd.backupFilesPath, fmt.Sprintf(backup.BackupFilePattern, cmd.database, cmd.retention, id))
+	pat := filepath.Join(cmd.backupFilesPath, fmt.Sprintf(backup.BackupFilePattern, cmd.destinationDatabase, cmd.retention, id))
 	return cmd.unpackFiles(pat + ".*")
 }
 
-// unpackDatabase will look for all backup files in the path matching this database
+// unpackDatabase will look for all backup files in the path matching this destinationDatabase
 // and restore them to the data dir
 func (cmd *Command) unpackDatabase() error {
 	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database)
+	restorePath := filepath.Join(cmd.datadir, cmd.destinationDatabase)
 	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("database already present: %s", restorePath)
+		return fmt.Errorf("destinationDatabase already present: %s", restorePath)
 	}
 
-	// find the database backup files
-	pat := filepath.Join(cmd.backupFilesPath, cmd.database)
+	// find the destinationDatabase backup files
+	pat := filepath.Join(cmd.backupFilesPath, cmd.destinationDatabase)
 	return cmd.unpackFiles(pat + ".*")
 }
 
@@ -252,13 +271,13 @@ func (cmd *Command) unpackDatabase() error {
 // and restore them to the data dir
 func (cmd *Command) unpackRetention() error {
 	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database, cmd.retention)
+	restorePath := filepath.Join(cmd.datadir, cmd.destinationDatabase, cmd.retention)
 	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retention already present: %s", restorePath)
 	}
 
 	// find the retention backup files
-	pat := filepath.Join(cmd.backupFilesPath, cmd.database)
+	pat := filepath.Join(cmd.backupFilesPath, cmd.destinationDatabase)
 	return cmd.unpackFiles(fmt.Sprintf("%s.%s.*", pat, cmd.retention))
 }
 
@@ -279,6 +298,95 @@ func (cmd *Command) unpackFiles(pat string) error {
 		if err := cmd.unpackGzip(fn); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// unpackFiles will look for backup files matching the pattern and restore them to the data dir
+func (cmd *Command) uploadShardsLive() error {
+
+	// gets DB, RP, shardID from a path string.
+	//a := strings.Split(path, string(filepath.Separator))
+	//if len(a) != 3 {
+	//	return "", "", fmt.Errorf("expected destinationDatabase, retention policy, and shard id in path: %s", path)
+	//}
+
+	// find the destinationDatabase backup files
+	pat := fmt.Sprintf("%s.*", filepath.Join(cmd.backupFilesPath, cmd.sourceDatabase))
+
+	fmt.Printf("Restoring from backup %s\n", pat)
+
+	backupFiles, err := filepath.Glob(pat)
+	if err != nil {
+		return err
+	}
+
+	if len(backupFiles) == 0 {
+		return fmt.Errorf("no backup files for %s in %s", pat, cmd.backupFilesPath)
+	}
+
+	fmt.Println(backupFiles)
+	for _, fn := range backupFiles {
+		fmt.Println(fn)
+		parts := strings.Split(fn, ".")
+
+		if len(parts) != 4 {
+			cmd.StderrLogger.Printf("Skipping mis-named backup file: %s", fn)
+		}
+		shardID, err := strconv.ParseUint(parts[2], 10, 64)
+		if err != nil {
+			return err
+		}
+
+		newShardID := cmd.shardIDMap[shardID]
+
+		conn, err := tcp.Dial("tcp", cmd.host, snapshotter.MuxHeader)
+		if err != nil {
+			return err
+		}
+
+		conn.Write([]byte{byte(snapshotter.RequestShardUpdate)})
+
+		// 0.  write the shard ID to pw
+		shardBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(shardBytes, newShardID)
+		conn.Write(shardBytes)
+		// 1.  open TAR reader for file
+		f, err := os.Open(fn)
+
+		if err != nil {
+			return err
+		}
+		tr := tar.NewReader(f)
+
+		tw := tar.NewWriter(conn)
+
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				tw.Close()
+				f.Close()
+				conn.Close()
+				return err
+			}
+
+			names := strings.Split(hdr.Name, "/")
+			hdr.Name = filepath.ToSlash(filepath.Join(cmd.destinationDatabase, names[1], strconv.FormatUint(newShardID, 10), names[3]))
+
+			tw.WriteHeader(hdr)
+			if _, err := io.Copy(tw, tr); err != nil {
+				tw.Close()
+				f.Close()
+				conn.Close()
+				return err
+			}
+		}
+		tw.Close()
+		f.Close()
+		conn.Close()
 	}
 
 	return nil
@@ -411,7 +519,6 @@ func (cmd *Command) unpackGzipFile(tr *tar.Reader, fileName string) error {
 
 // upload takes a request object, attaches a Base64 encoding to the request, and sends it to the snapshotter service.
 func (cmd *Command) upload(req *snapshotter.Request, upStream io.Reader, nbytes int64) ([]byte, error) {
-	// Create local file to write to.
 
 	req.UploadSize = nbytes
 	var err error
@@ -420,18 +527,22 @@ func (cmd *Command) upload(req *snapshotter.Request, upStream io.Reader, nbytes 
 	for i := 0; i < 10; i++ {
 		if err = func() error {
 			// Connect to snapshotter service.
+
 			conn, err := tcp.Dial("tcp", cmd.host, snapshotter.MuxHeader)
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
 
-			// Write the request
-			if err := json.NewEncoder(conn).Encode(req); err != nil {
-				return fmt.Errorf("encode snapshot request: %s", err)
+			conn.Write([]byte{byte(req.Type)})
+
+			if req.Type != snapshotter.RequestShardUpdate { // Write the request
+				if err := json.NewEncoder(conn).Encode(req); err != nil {
+					return fmt.Errorf("encode snapshot request: %s", err)
+				}
 			}
 
-			if n, err := io.CopyN(conn, upStream, nbytes*2); (err != nil && err != io.EOF) || n != req.UploadSize {
+			if n, err := io.Copy(conn, upStream); (err != nil && err != io.EOF) || n != req.UploadSize {
 				return fmt.Errorf("error uploading file: err=%v, n=%d, uploadSize: %d", err, n, req.UploadSize)
 			}
 
@@ -469,15 +580,15 @@ Usage: influxd restore [flags] PATH
             Optional. If set the metastore will be recovered to the given path.
     -datadir <path>
             Optional. If set the restore process will recover the specified
-            database, retention policy or shard to the given directory.
-    -database <name>
-            Optional. Required if no metadir given. Will restore the database
+            destinationDatabase, retention policy or shard to the given directory.
+    -destinationDatabase <name>
+            Optional. Required if no metadir given. Will restore the destinationDatabase
             TSM files.
     -retention <name>
-            Optional. If given, database is required. Will restore the retention policy's
+            Optional. If given, destinationDatabase is required. Will restore the retention policy's
             TSM files.
     -shard <id>
-            Optional. If given, database and retention are required. Will restore the shard's
+            Optional. If given, destinationDatabase and retention are required. Will restore the shard's
             TSM files.
 
 `)

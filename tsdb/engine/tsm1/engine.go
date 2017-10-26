@@ -696,10 +696,14 @@ func (e *Engine) Export(w io.Writer, basePath string, start time.Time, end time.
 		}
 
 		min, max := r.TimeRange()
+		stun := start.UnixNano()
+		eun := end.UnixNano()
+		fmt.Printf("%d, %d", stun, eun)
 
 		// We overlap time ranges, we need to filter the file
-		if min >= start.UnixNano() && min <= end.UnixNano() ||
-			max >= start.UnixNano() && max <= end.UnixNano() {
+		if min >= stun && min <= eun && max > eun || // overlap to the right
+			max >= stun && max <= eun && min < stun || // overlap to the left
+			min <= stun && max >= eun { // TSM file has a range LARGER than the boundary
 			err := e.filterFileToBackup(r, file, basePath, filepath.Join(path, file), start.UnixNano(), end.UnixNano(), tw)
 			if err != nil {
 				return err
@@ -754,7 +758,8 @@ func (e *Engine) filterFileToBackup(r *TSMReader, name, shardRelativePath, fullP
 			return err
 		}
 		if minTime >= start && minTime <= end ||
-			maxTime >= start && maxTime <= end {
+			maxTime >= start && maxTime <= end ||
+			minTime <= start && maxTime >= end {
 			err := w.WriteBlock(key, minTime, maxTime, buf)
 			if err != nil {
 				return err
@@ -767,7 +772,10 @@ func (e *Engine) filterFileToBackup(r *TSMReader, name, shardRelativePath, fullP
 		return err
 	}
 
-	return e.writeFileToBackup(path, shardRelativePath, fullPath, tw)
+	// make sure the whole file is out to disk
+	w.Flush()
+
+	return e.writeFileToBackup(name, shardRelativePath, path, tw)
 }
 
 // writeFileToBackup copies the file into the tar archive. Files will use the shardRelativePath
@@ -852,8 +860,10 @@ func (e *Engine) overlay(r io.Reader, basePath string, asNew bool) error {
 		tr := tar.NewReader(r)
 		for {
 			if fileName, err := e.readFileFromBackup(tr, basePath, asNew); err == io.EOF {
+				fmt.Println(err)
 				break
 			} else if err != nil {
+				fmt.Println(err)
 				return nil, err
 			} else if fileName != "" {
 				newFiles = append(newFiles, fileName)
